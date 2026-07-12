@@ -1,574 +1,631 @@
-/* ═══════════════════════════════════════════════════
-   NEXUS CRM — MAIN JAVASCRIPT
-   Three.js 3D scenes + GSAP animations + UI logic
-   ═══════════════════════════════════════════════════ */
+/* ==========================================================================
+   Portail HubSpot — Portfolio Moncef
+   Logique de la SPA : rendu des vues, navigation, tour guidé.
+   ========================================================================== */
 
 (function () {
-  'use strict';
+  "use strict";
 
-  /* ─── utility ────────────────────────────────────── */
-  const qs  = (s, ctx = document) => ctx.querySelector(s);
-  const qsa = (s, ctx = document) => [...ctx.querySelectorAll(s)];
-  const lerp = (a, b, t) => a + (b - a) * t;
+  const root = document.getElementById("view-root");
+  const visited = new Set();
+  let activeFilter = "all";
+  let searchQuery = "";
+  let bannerDismissed = false;
 
-  /* ════════════════════════════════════════════════
-     1. THREE.JS — HERO PARTICLE FIELD
-  ════════════════════════════════════════════════ */
-  function initHeroCanvas() {
-    const canvas = qs('#hero-canvas');
-    if (!canvas || typeof THREE === 'undefined') return;
+  const TYPE_CLASS = {
+    Complet: "pill-complet",
+    Hybride: "pill-hybride",
+    Ponctuel: "pill-ponctuel",
+  };
 
-    const scene    = new THREE.Scene();
-    const camera   = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 2000);
-    camera.position.z = 600;
+  /* ------------------------------------------------------------------ */
+  /* Routeur minimal basé sur le hash                                    */
+  /* ------------------------------------------------------------------ */
 
-    const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
-    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    renderer.setSize(innerWidth, innerHeight);
-
-    /* ── particles ─────────────────────────────────── */
-    const PARTICLE_COUNT = 1800;
-    const positions = new Float32Array(PARTICLE_COUNT * 3);
-    const colours   = new Float32Array(PARTICLE_COUNT * 3);
-    const sizes     = new Float32Array(PARTICLE_COUNT);
-
-    const palette = [
-      new THREE.Color('#3b82f6'),
-      new THREE.Color('#8b5cf6'),
-      new THREE.Color('#06b6d4'),
-      new THREE.Color('#e0e7ff'),
-    ];
-
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      const r = 400 + Math.random() * 500;
-      const theta = Math.random() * Math.PI * 2;
-      const phi   = Math.acos(2 * Math.random() - 1);
-
-      positions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
-      positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-      positions[i * 3 + 2] = r * Math.cos(phi);
-
-      const c = palette[Math.floor(Math.random() * palette.length)];
-      colours[i * 3]     = c.r;
-      colours[i * 3 + 1] = c.g;
-      colours[i * 3 + 2] = c.b;
-
-      sizes[i] = Math.random() * 2.5 + 0.5;
+  function parseHash() {
+    const hash = location.hash.replace(/^#\/?/, "");
+    if (hash.startsWith("client/")) {
+      const id = hash.slice("client/".length);
+      if (CLIENTS.some((c) => c.id === id)) return { view: "record", id };
     }
+    return { view: "list" };
+  }
 
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geo.setAttribute('color',    new THREE.BufferAttribute(colours, 3));
-    geo.setAttribute('size',     new THREE.BufferAttribute(sizes, 1));
+  function goTo(hash) {
+    location.hash = hash;
+  }
 
-    const mat = new THREE.ShaderMaterial({
-      uniforms: {
-        uTime:   { value: 0 },
-        uPixelRatio: { value: Math.min(devicePixelRatio, 2) },
-      },
-      vertexShader: `
-        uniform float uTime;
-        uniform float uPixelRatio;
-        attribute float size;
-        attribute vec3 color;
-        varying vec3 vColor;
-        varying float vAlpha;
-        void main() {
-          vColor = color;
-          vec3 pos = position;
-          pos.y += sin(uTime * 0.4 + position.x * 0.008) * 8.0;
-          pos.x += cos(uTime * 0.3 + position.z * 0.008) * 6.0;
-          vec4 mv = modelViewMatrix * vec4(pos, 1.0);
-          gl_Position = projectionMatrix * mv;
-          gl_PointSize = size * uPixelRatio * (400.0 / -mv.z);
-          vAlpha = smoothstep(900.0, 200.0, -mv.z);
+  window.addEventListener("hashchange", render);
+
+  /* ------------------------------------------------------------------ */
+  /* Rendu                                                                */
+  /* ------------------------------------------------------------------ */
+
+  function render() {
+    const route = parseHash();
+    if (route.view === "record") {
+      visited.add(route.id);
+      root.innerHTML = renderRecord(route.id);
+      window.scrollTo(0, 0);
+      bindRecordEvents(route.id);
+    } else {
+      root.innerHTML = renderList();
+      bindListEvents();
+    }
+    maybeAdvanceTourOnRender();
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function logoMarkup(client, size, extraClass) {
+    const initials = escapeHtml(client.initiales);
+    const cls = extraClass ? `logo-badge ${extraClass}` : "logo-badge";
+    return `<span class="${cls}" style="background:${client.couleur};width:${size}px;height:${size}px;font-size:${Math.round(
+      size * 0.38
+    )}px">${initials}</span>`;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Vue Liste                                                           */
+  /* ------------------------------------------------------------------ */
+
+  const FILTERS = [
+    { key: "all", label: "Tous les clients" },
+    { key: "Complet", label: "Accompagnement complet" },
+    { key: "Hybride", label: "Hybride" },
+    { key: "Ponctuel", label: "Missions ponctuelles" },
+  ];
+
+  function filteredClients() {
+    let list = CLIENTS;
+    if (activeFilter !== "all") {
+      list = list.filter((c) => c.typeAccompagnement === activeFilter);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      list = list.filter(
+        (c) => c.nom.toLowerCase().includes(q) || c.secteur.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }
+
+  function renderList() {
+    const list = filteredClients();
+    const rows = list
+      .map((c) => {
+        const pillClass = TYPE_CLASS[c.typeAccompagnement] || "";
+        const isVisited = visited.has(c.id);
+        return `
+        <tr tabindex="0" role="button" data-id="${c.id}" aria-label="Ouvrir la fiche ${escapeHtml(c.nom)}">
+          <td>
+            <div class="cell-name">
+              ${logoMarkup(c, 26)}
+              <span class="name-link">${escapeHtml(c.nom)}</span>
+            </div>
+          </td>
+          <td class="col-hide-tablet">${escapeHtml(c.secteur)}</td>
+          <td><span class="pill ${pillClass}">${escapeHtml(c.typeAccompagnement)}</span></td>
+          <td class="col-hide-tablet">
+            <div class="tag-row">${c.stack
+              .slice(0, 3)
+              .map((s) => `<span class="tag">${escapeHtml(s)}</span>`)
+              .join("")}${c.stack.length > 3 ? `<span class="tag">+${c.stack.length - 3}</span>` : ""}</div>
+          </td>
+          <td class="col-hide-mobile">${escapeHtml(c.duree)}</td>
+          <td class="cell-realisations"><b>${c.realisations.length}</b> consignées</td>
+          <td class="col-hide-mobile">${isVisited ? '<span class="visited-check">✓ Vu</span>' : '<span class="visited-dash">—</span>'}</td>
+        </tr>`;
+      })
+      .join("");
+
+    const tabs = FILTERS.map((f) => {
+      const count = f.key === "all" ? CLIENTS.length : CLIENTS.filter((c) => c.typeAccompagnement === f.key).length;
+      return `<button class="view-tab ${activeFilter === f.key ? "active" : ""}" data-filter="${f.key}">
+        ${f.label} <span class="count">${count}</span>
+      </button>`;
+    }).join("");
+
+    return `
+    ${!bannerDismissed ? `
+    <div class="info-banner" id="info-banner">
+      <div class="info-banner-text">
+        <strong>Bienvenue sur mon portail.</strong> Ce site reproduit l'interface de HubSpot pour présenter les clients que j'accompagne — parcourez les fiches comme un vrai CRM.
+      </div>
+      <button class="btn btn-dark" id="banner-contact">Me contacter</button>
+      <button class="info-banner-close" id="banner-close" aria-label="Fermer le bandeau">✕</button>
+    </div>` : ""}
+
+    <div class="list-header">
+      <div class="object-selector" id="tour-object-selector">🏢 Clients accompagnés <span class="chevron">▾</span></div>
+      <button class="btn btn-dark" id="header-contact">Me contacter</button>
+    </div>
+
+    <div class="view-tabs" id="tour-view-tabs">
+      ${tabs}
+      <button class="view-tab add" aria-label="Ajouter une vue">＋</button>
+    </div>
+
+    <div class="toolbar">
+      <input type="text" class="toolbar-search-input" id="search-input" placeholder="Rechercher un client…" value="${escapeHtml(searchQuery)}" aria-label="Rechercher un client">
+      <button class="toolbar-btn">Vue de tableau <span class="chevron">▾</span></button>
+      <button class="toolbar-btn">Modifier les colonnes</button>
+      <button class="toolbar-btn active">Filtres</button>
+      <button class="toolbar-btn">Trier</button>
+      <div class="toolbar-spacer"></div>
+      <button class="toolbar-btn">Exporter</button>
+    </div>
+
+    <div class="filter-row">
+      <span class="filter-link">Propriétaire de la fiche ▾</span>
+      <span class="filter-link">Secteur ▾</span>
+      <span class="filter-link">Type d'accompagnement ▾</span>
+      <span class="filter-link">Stack ▾</span>
+      <span class="filter-link">Filtres avancés</span>
+    </div>
+
+    <div class="table-card" id="tour-table">
+      <table class="client-table">
+        <thead>
+          <tr>
+            <th>Nom</th>
+            <th class="col-hide-tablet">Secteur</th>
+            <th>Type d'accompagnement</th>
+            <th class="col-hide-tablet">Stack</th>
+            <th class="col-hide-mobile">Durée</th>
+            <th>Réalisations</th>
+            <th class="col-hide-mobile">Vu</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows || `<tr><td colspan="7"><div class="empty-state">Aucun client ne correspond à ces filtres.</div></td></tr>`}
+        </tbody>
+      </table>
+      <div class="table-footer">
+        <div class="pagination-dots">
+          <span>‹</span><span class="current">1</span><span>›</span>
+        </div>
+        <div class="explored-counter">Fiches explorées <b>${visited.size}</b>/${CLIENTS.length}</div>
+      </div>
+    </div>
+    `;
+  }
+
+  function bindListEvents() {
+    document.querySelectorAll(".client-table tbody tr[data-id]").forEach((tr) => {
+      tr.addEventListener("click", () => goTo(`#/client/${tr.dataset.id}`));
+      tr.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          goTo(`#/client/${tr.dataset.id}`);
         }
-      `,
-      fragmentShader: `
-        varying vec3 vColor;
-        varying float vAlpha;
-        void main() {
-          float d = length(gl_PointCoord - 0.5) * 2.0;
-          float alpha = (1.0 - smoothstep(0.4, 1.0, d)) * vAlpha;
-          gl_FragColor = vec4(vColor, alpha * 0.8);
+      });
+    });
+
+    document.querySelectorAll(".view-tab[data-filter]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        activeFilter = btn.dataset.filter;
+        render();
+      });
+    });
+
+    const searchInput = document.getElementById("search-input");
+    if (searchInput) {
+      searchInput.addEventListener("input", (e) => {
+        searchQuery = e.target.value;
+        const focusPos = searchInput.selectionStart;
+        render();
+        const newInput = document.getElementById("search-input");
+        if (newInput) {
+          newInput.focus();
+          newInput.setSelectionRange(focusPos, focusPos);
         }
-      `,
-      transparent: true,
-      vertexColors: true,
-      depthWrite: false,
-    });
-
-    const points = new THREE.Points(geo, mat);
-    scene.add(points);
-
-    /* ── floating wireframe geometries ─────────────── */
-    function makeWireShape(geo, color, pos, scale = 1) {
-      const mat = new THREE.MeshBasicMaterial({
-        color,
-        wireframe: true,
-        transparent: true,
-        opacity: 0.12,
       });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(...pos);
-      mesh.scale.setScalar(scale);
-      scene.add(mesh);
-      return mesh;
     }
 
-    const shapes = [
-      makeWireShape(new THREE.IcosahedronGeometry(80, 1), 0x3b82f6,  [-280, 100, -200], 1),
-      makeWireShape(new THREE.OctahedronGeometry(60, 0),  0x8b5cf6,  [ 300,-80,  -300], 1),
-      makeWireShape(new THREE.TorusGeometry(55, 18, 12, 32), 0x06b6d4, [100, 200, -250], 1),
-      makeWireShape(new THREE.TetrahedronGeometry(70, 0), 0x8b5cf6,  [-200,-180, -100], 1),
-      makeWireShape(new THREE.IcosahedronGeometry(50, 1), 0x3b82f6,  [ 220, 160, -150], 0.8),
-    ];
+    const bannerClose = document.getElementById("banner-close");
+    if (bannerClose) {
+      bannerClose.addEventListener("click", () => {
+        bannerDismissed = true;
+        render();
+      });
+    }
 
-    /* ── mouse parallax ────────────────────────────── */
-    let mouseX = 0, mouseY = 0;
-    let targetX = 0, targetY = 0;
-    document.addEventListener('mousemove', e => {
-      mouseX = (e.clientX / innerWidth  - 0.5) * 2;
-      mouseY = (e.clientY / innerHeight - 0.5) * 2;
-    });
+    const bannerContact = document.getElementById("banner-contact");
+    if (bannerContact) bannerContact.addEventListener("click", scrollToContactOrOpen);
 
-    /* ── resize ────────────────────────────────────── */
-    window.addEventListener('resize', () => {
-      camera.aspect = innerWidth / innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(innerWidth, innerHeight);
-    });
+    const headerContact = document.getElementById("header-contact");
+    if (headerContact) headerContact.addEventListener("click", scrollToContactOrOpen);
+  }
 
-    /* ── animate ───────────────────────────────────── */
-    let frame = 0;
-    const rotations = shapes.map(() => ({
-      x: (Math.random() - 0.5) * 0.005,
-      y: (Math.random() - 0.5) * 0.005,
-      z: (Math.random() - 0.5) * 0.003,
-    }));
+  function scrollToContactOrOpen() {
+    if (CONTACT_LINKS.meetings && CONTACT_LINKS.meetings !== "#") {
+      window.open(CONTACT_LINKS.meetings, "_blank", "noopener");
+    } else {
+      goTo(`#/client/${CLIENTS[0].id}`);
+    }
+  }
 
-    function tick() {
-      requestAnimationFrame(tick);
-      frame += 0.008;
+  /* ------------------------------------------------------------------ */
+  /* Vue Fiche                                                            */
+  /* ------------------------------------------------------------------ */
 
-      mat.uniforms.uTime.value = frame;
+  function renderRecord(id) {
+    const index = CLIENTS.findIndex((c) => c.id === id);
+    const client = CLIENTS[index];
+    const isLast = index === CLIENTS.length - 1;
+    const pillClass = TYPE_CLASS[client.typeAccompagnement] || "";
+    const today = new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" });
 
-      targetX = lerp(targetX, mouseX, 0.05);
-      targetY = lerp(targetY, mouseY, 0.05);
+    const realisationsHtml = client.realisations
+      .map(
+        (r) => `
+      <div class="timeline-item">
+        <div class="timeline-icon">${r.icone}</div>
+        <div class="timeline-card">
+          <h5>${escapeHtml(r.titre)}</h5>
+          <p class="timeline-meta">consignée par Moncef</p>
+          <p>${escapeHtml(r.description)}</p>
+        </div>
+      </div>`
+      )
+      .join("");
 
-      points.rotation.y = frame * 0.04 + targetX * 0.12;
-      points.rotation.x = targetY * 0.08;
+    const resultatsHtml = client.resultats
+      .map((r) => `<li><span class="result-check">✓</span><span>${escapeHtml(r)}</span></li>`)
+      .join("");
 
-      shapes.forEach((s, i) => {
-        s.rotation.x += rotations[i].x;
-        s.rotation.y += rotations[i].y;
-        s.rotation.z += rotations[i].z;
-        s.position.y += Math.sin(frame + i) * 0.3;
+    const stackHtml = client.stack.map((s) => `<span class="tag">${escapeHtml(s)}</span>`).join("");
+
+    return `
+    <div class="record-view">
+      <div class="record-topline">
+        <button class="back-link" id="back-to-list">‹ Clients</button>
+        <button class="toolbar-btn">Actions ▾</button>
+      </div>
+
+      <div class="record-col-left" id="tour-record-left">
+        <div class="card record-header-card">
+          ${logoMarkup(client, 52, "record-logo")}
+          <h1 class="record-name">${escapeHtml(client.nom)}</h1>
+          <a class="record-sector-link" href="javascript:void(0)">${escapeHtml(client.secteur)}</a>
+
+          <div class="action-row">
+            <button class="action-btn" title="Note" aria-label="Note">📝</button>
+            <button class="action-btn" title="E-mail" aria-label="E-mail">✉️</button>
+            <button class="action-btn" title="Appel" aria-label="Appel">📞</button>
+            <button class="action-btn" title="Tâche" aria-label="Tâche">✅</button>
+            <button class="action-btn next" title="Client suivant" aria-label="Client suivant" id="action-next">→</button>
+          </div>
+        </div>
+
+        <div class="card about-panel">
+          <div class="card-title-row">
+            <p class="card-title">À propos de ce client</p>
+            <button class="panel-toggle" aria-label="Réduire le panneau"><span class="chevron-toggle">▾</span></button>
+          </div>
+          <dl>
+            <div class="about-row">
+              <p class="about-label">Secteur</p>
+              <p class="about-value">${escapeHtml(client.secteur)}</p>
+            </div>
+            <div class="about-row">
+              <p class="about-label">Type d'accompagnement</p>
+              <p class="about-value"><span class="pill ${pillClass}">${escapeHtml(client.typeAccompagnement)}</span></p>
+            </div>
+            <div class="about-row">
+              <p class="about-label">Périmètre</p>
+              <p class="about-value">${escapeHtml(client.perimetre)}</p>
+            </div>
+            <div class="about-row">
+              <p class="about-label">Durée de la mission</p>
+              <p class="about-value">${escapeHtml(client.duree)}</p>
+            </div>
+            <div class="about-row">
+              <p class="about-label">Propriétaire de la fiche</p>
+              <p class="about-value owner"><span class="owner-avatar">MB</span> Moncef — Consultant CRM &amp; Martech</p>
+            </div>
+          </dl>
+        </div>
+      </div>
+
+      <div class="record-col-center" id="tour-record-center">
+        <div class="record-tabs">
+          <button class="record-tab active">Actualité</button>
+          <button class="record-tab" disabled>Vue d'ensemble</button>
+          <button class="record-tab" disabled>Activités</button>
+          <button class="record-tab" disabled>Intelligence</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title-row">
+            <p class="card-title">Informations sur la mission</p>
+            <span class="ai-badge">✦ AI</span>
+          </div>
+          <p class="ai-meta">Généré le ${today} ⟳</p>
+          <div class="summary-block">
+            <h4>Contexte</h4>
+            <p>${escapeHtml(client.resume.contexte)}</p>
+            <h4>Rôle de Moncef</h4>
+            <p>${escapeHtml(client.resume.role)}</p>
+          </div>
+          <button class="btn btn-outline-pink">✦ Poser une question</button>
+        </div>
+
+        <p class="section-heading">Réalisations <small>· consignées par Moncef</small></p>
+        <div class="timeline">${realisationsHtml}</div>
+
+        <div class="record-footer">
+          <div class="record-footer-count">Client ${index + 1} sur ${CLIENTS.length}</div>
+          <div class="record-footer-nav">
+            <button class="btn btn-secondary" id="prev-client" ${index === 0 ? "disabled" : ""}>‹ Précédent</button>
+            <button class="btn btn-dark" id="next-client">${isLast ? "Retour aux clients ›" : "Client suivant ›"}</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="record-col-right" id="tour-record-right">
+        <div class="card">
+          <p class="card-title">Résultats de la mission</p>
+          <ul class="result-list">${resultatsHtml}</ul>
+        </div>
+
+        <div class="card stack-panel">
+          <p class="card-title">Stack associée</p>
+          <div class="tag-row">${stackHtml}</div>
+        </div>
+
+        <div class="card contact-panel">
+          <p>Un profil ou un poste qui pourrait correspondre à ce type d'accompagnement ?</p>
+          <div class="contact-links">
+            <a href="${CONTACT_LINKS.meetings}" target="_blank" rel="noopener">📅 Prendre rendez-vous</a>
+            <a href="${CONTACT_LINKS.cv}" target="_blank" rel="noopener">📄 CV</a>
+            <a href="${CONTACT_LINKS.linkedin}" target="_blank" rel="noopener">🔗 LinkedIn</a>
+          </div>
+        </div>
+      </div>
+    </div>
+    `;
+  }
+
+  function bindRecordEvents(id) {
+    const index = CLIENTS.findIndex((c) => c.id === id);
+    const isLast = index === CLIENTS.length - 1;
+
+    const back = document.getElementById("back-to-list");
+    if (back) back.addEventListener("click", () => goTo("#/"));
+
+    const prev = document.getElementById("prev-client");
+    if (prev)
+      prev.addEventListener("click", () => {
+        if (index > 0) goTo(`#/client/${CLIENTS[index - 1].id}`);
       });
 
-      renderer.render(scene, camera);
-    }
-    tick();
-  }
+    const next = document.getElementById("next-client");
+    if (next)
+      next.addEventListener("click", () => {
+        if (isLast) goTo("#/");
+        else goTo(`#/client/${CLIENTS[index + 1].id}`);
+      });
 
-  /* ════════════════════════════════════════════════
-     2. THREE.JS — CTA BACKGROUND
-  ════════════════════════════════════════════════ */
-  function initCtaCanvas() {
-    const canvas = qs('#cta-canvas');
-    if (!canvas || typeof THREE === 'undefined') return;
+    const actionNext = document.getElementById("action-next");
+    if (actionNext)
+      actionNext.addEventListener("click", () => {
+        if (isLast) goTo("#/");
+        else goTo(`#/client/${CLIENTS[index + 1].id}`);
+      });
 
-    const scene    = new THREE.Scene();
-    const camera   = new THREE.PerspectiveCamera(50, canvas.offsetWidth / canvas.offsetHeight, 0.1, 1000);
-    camera.position.z = 400;
-
-    const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
-    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    renderer.setSize(canvas.offsetWidth, canvas.offsetHeight);
-
-    const COUNT = 500;
-    const pos   = new Float32Array(COUNT * 3);
-    for (let i = 0; i < COUNT; i++) {
-      pos[i * 3]     = (Math.random() - 0.5) * 800;
-      pos[i * 3 + 1] = (Math.random() - 0.5) * 600;
-      pos[i * 3 + 2] = (Math.random() - 0.5) * 400;
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    const m = new THREE.PointsMaterial({
-      color: 0x8b5cf6, size: 1.5, transparent: true, opacity: 0.5,
+    document.querySelectorAll(".panel-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const panel = btn.closest(".card");
+        const dl = panel.querySelector("dl");
+        const chevron = btn.querySelector(".chevron-toggle");
+        dl.classList.toggle("collapsed");
+        chevron.classList.toggle("collapsed");
+      });
     });
-    scene.add(new THREE.Points(g, m));
-
-    let t = 0;
-    const ro = new THREE.IcosahedronGeometry(80, 1);
-    const rm = new THREE.MeshBasicMaterial({ color: 0x8b5cf6, wireframe: true, opacity: 0.08, transparent: true });
-    const rMesh = new THREE.Mesh(ro, rm);
-    scene.add(rMesh);
-
-    const resize = () => {
-      const w = canvas.offsetWidth, h = canvas.offsetHeight;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
-    };
-    window.addEventListener('resize', resize);
-
-    (function tick() {
-      requestAnimationFrame(tick);
-      t += 0.005;
-      rMesh.rotation.x = t * 0.6;
-      rMesh.rotation.y = t * 0.4;
-      renderer.render(scene, camera);
-    })();
   }
 
-  /* ════════════════════════════════════════════════
-     3. NAVBAR — scroll behaviour
-  ════════════════════════════════════════════════ */
-  function initNavbar() {
-    const nav = qs('#navbar');
-    const scrolled = () => {
-      nav.classList.toggle('scrolled', scrollY > 20);
-    };
-    window.addEventListener('scroll', scrolled, { passive: true });
-    scrolled();
-  }
+  /* ------------------------------------------------------------------ */
+  /* Navigation clavier globale                                          */
+  /* ------------------------------------------------------------------ */
 
-  /* ════════════════════════════════════════════════
-     4. MOBILE MENU
-  ════════════════════════════════════════════════ */
-  function initMobileMenu() {
-    const btn  = qs('#hamburger');
-    const menu = qs('#mobileMenu');
-    let open = false;
+  document.addEventListener("keydown", (e) => {
+    if (tourActive) return;
+    const active = document.activeElement;
+    const isTyping = active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
+    if (isTyping) return;
 
-    btn.addEventListener('click', () => {
-      open = !open;
-      menu.classList.toggle('open', open);
-      document.body.style.overflow = open ? 'hidden' : '';
-      const spans = btn.querySelectorAll('span');
-      if (open) {
-        spans[0].style.transform = 'translateY(7px) rotate(45deg)';
-        spans[1].style.opacity = '0';
-        spans[2].style.transform = 'translateY(-7px) rotate(-45deg)';
-      } else {
-        spans[0].style.transform = '';
-        spans[1].style.opacity = '';
-        spans[2].style.transform = '';
+    const route = parseHash();
+    if (route.view === "record") {
+      const index = CLIENTS.findIndex((c) => c.id === route.id);
+      if (e.key === "ArrowRight" && index < CLIENTS.length - 1) {
+        goTo(`#/client/${CLIENTS[index + 1].id}`);
+      } else if (e.key === "ArrowLeft" && index > 0) {
+        goTo(`#/client/${CLIENTS[index - 1].id}`);
+      } else if (e.key === "Escape") {
+        goTo("#/");
       }
-    });
-
-    qsa('.mobile-link').forEach(a => {
-      a.addEventListener('click', () => {
-        open = false;
-        menu.classList.remove('open');
-        document.body.style.overflow = '';
-        btn.querySelectorAll('span').forEach(s => {
-          s.style.transform = '';
-          s.style.opacity = '';
-        });
-      });
-    });
-  }
-
-  /* ════════════════════════════════════════════════
-     5. GSAP SCROLL ANIMATIONS
-  ════════════════════════════════════════════════ */
-  function initGSAP() {
-    if (typeof gsap === 'undefined') return;
-    gsap.registerPlugin(ScrollTrigger);
-
-    /* Smooth page entrance */
-    gsap.from('body', { opacity: 0, duration: 0.6, ease: 'power2.out' });
-
-    /* Hero entrance sequence */
-    const heroTl = gsap.timeline({ delay: 0.3 });
-    heroTl
-      .from('.hero-badge', { opacity: 0, y: -20, duration: 0.7, ease: 'back.out(2)' })
-      .from('.hero-title',  { opacity: 0, y:  40, duration: 0.8, ease: 'power3.out' }, '-=0.3')
-      .from('.hero-sub',    { opacity: 0, y:  30, duration: 0.7, ease: 'power2.out' }, '-=0.4')
-      .from('.hero-cta',    { opacity: 0, y:  20, duration: 0.6, ease: 'power2.out' }, '-=0.3')
-      .from('.hero-stats',  { opacity: 0, y:  20, duration: 0.6, ease: 'power2.out' }, '-=0.3')
-      .from('.scroll-hint', { opacity: 0, duration: 0.8 }, '-=0.2');
-
-    /* Animated line on process section */
-    gsap.from('.process-line', {
-      scaleY: 0,
-      transformOrigin: 'top',
-      duration: 1.5,
-      ease: 'power2.out',
-      scrollTrigger: {
-        trigger: '#process',
-        start: 'top 70%',
-      },
-    });
-
-    /* Platform cards stagger */
-    gsap.from('.platform-card', {
-      y: 50,
-      opacity: 0,
-      stagger: 0.08,
-      duration: 0.7,
-      ease: 'power3.out',
-      scrollTrigger: {
-        trigger: '.platforms-grid',
-        start: 'top 80%',
-      },
-    });
-
-    /* Stat cards pop */
-    gsap.from('.stat-card', {
-      scale: 0.85,
-      opacity: 0,
-      stagger: 0.07,
-      duration: 0.6,
-      ease: 'back.out(1.4)',
-      scrollTrigger: {
-        trigger: '.stats-grid',
-        start: 'top 80%',
-      },
-    });
-
-    /* Floating parallax on hero shapes — driven by scroll */
-    gsap.to('.hero-content', {
-      y: 120,
-      ease: 'none',
-      scrollTrigger: {
-        trigger: '#hero',
-        start: 'top top',
-        end:   'bottom top',
-        scrub: true,
-      },
-    });
-  }
-
-  /* ════════════════════════════════════════════════
-     6. AOS — Animate On Scroll (lightweight custom)
-  ════════════════════════════════════════════════ */
-  function initAOS() {
-    const items = qsa('[data-aos]');
-    if (!items.length) return;
-
-    const delays = {};
-    items.forEach(el => {
-      const d = parseInt(el.dataset.aosDelay || 0, 10);
-      delays[el] = d;
-    });
-
-    const observer = new IntersectionObserver(entries => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          const el = entry.target;
-          const delay = parseInt(el.dataset.aosDelay || 0, 10);
-          setTimeout(() => el.classList.add('aos-animate'), delay);
-          observer.unobserve(el);
-        }
-      });
-    }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
-
-    items.forEach(el => observer.observe(el));
-  }
-
-  /* ════════════════════════════════════════════════
-     7. COUNTER ANIMATION
-  ════════════════════════════════════════════════ */
-  function initCounters() {
-    const counters = qsa('.counter');
-    if (!counters.length) return;
-
-    const observer = new IntersectionObserver(entries => {
-      entries.forEach(entry => {
-        if (!entry.isIntersecting) return;
-        const el     = entry.target;
-        const target = parseFloat(el.dataset.target);
-        const isFloat = target % 1 !== 0;
-        const duration = 1600;
-        const start  = performance.now();
-
-        function update(now) {
-          const progress = Math.min((now - start) / duration, 1);
-          const eased = 1 - Math.pow(1 - progress, 3);
-          const val = target * eased;
-          el.textContent = isFloat ? val.toFixed(1) : Math.round(val);
-          if (progress < 1) requestAnimationFrame(update);
-        }
-        requestAnimationFrame(update);
-        observer.unobserve(el);
-      });
-    }, { threshold: 0.5 });
-
-    counters.forEach(c => observer.observe(c));
-  }
-
-  /* ════════════════════════════════════════════════
-     8. FAQ ACCORDION
-  ════════════════════════════════════════════════ */
-  function initFAQ() {
-    qsa('.faq-item').forEach(item => {
-      const btn = item.querySelector('.faq-question');
-      btn.addEventListener('click', () => {
-        const isOpen = item.classList.contains('open');
-        // close all
-        qsa('.faq-item.open').forEach(i => i.classList.remove('open'));
-        if (!isOpen) item.classList.add('open');
-      });
-    });
-  }
-
-  /* ════════════════════════════════════════════════
-     9. CONTACT FORM
-  ════════════════════════════════════════════════ */
-  function initContactForm() {
-    const form = qs('#contactForm');
-    if (!form) return;
-
-    form.addEventListener('submit', e => {
-      e.preventDefault();
-      const btn = form.querySelector('button[type="submit"]');
-      const original = btn.innerHTML;
-
-      btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px;animation:spin 1s linear infinite"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg> Sending…';
-      btn.disabled = true;
-      btn.style.opacity = '0.75';
-
-      setTimeout(() => {
-        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px"><path d="M20 6L9 17l-5-5"/></svg> Message sent! We\'ll be in touch.';
-        btn.style.background = 'linear-gradient(135deg, #22c55e, #16a34a)';
-        btn.style.boxShadow  = '0 4px 20px rgba(34,197,94,0.4)';
-        form.reset();
-        setTimeout(() => {
-          btn.innerHTML = original;
-          btn.disabled = false;
-          btn.style.opacity  = '';
-          btn.style.background = '';
-          btn.style.boxShadow  = '';
-        }, 4000);
-      }, 1200);
-    });
-  }
-
-  /* ════════════════════════════════════════════════
-     10. SMOOTH ANCHOR SCROLL
-  ════════════════════════════════════════════════ */
-  function initSmoothScroll() {
-    qsa('a[href^="#"]').forEach(a => {
-      a.addEventListener('click', e => {
-        const id = a.getAttribute('href');
-        if (id === '#') return;
-        const target = qs(id);
-        if (!target) return;
-        e.preventDefault();
-        const navH = parseInt(getComputedStyle(document.documentElement)
-          .getPropertyValue('--nav-h') || 72, 10);
-        const top = target.getBoundingClientRect().top + scrollY - navH;
-        window.scrollTo({ top, behavior: 'smooth' });
-      });
-    });
-  }
-
-  /* ════════════════════════════════════════════════
-     11. CURSOR GLOW EFFECT
-  ════════════════════════════════════════════════ */
-  function initCursorGlow() {
-    const glow = document.createElement('div');
-    glow.style.cssText = `
-      position:fixed; pointer-events:none; z-index:9999;
-      width:300px; height:300px; border-radius:50%;
-      background:radial-gradient(circle, rgba(59,130,246,0.06) 0%, transparent 70%);
-      transform:translate(-50%,-50%);
-      transition:opacity 0.3s;
-      opacity:0;
-    `;
-    document.body.appendChild(glow);
-
-    let mx = 0, my = 0, gx = 0, gy = 0;
-    document.addEventListener('mousemove', e => { mx = e.clientX; my = e.clientY; glow.style.opacity = '1'; });
-    document.addEventListener('mouseleave', () => { glow.style.opacity = '0'; });
-
-    (function tick() {
-      requestAnimationFrame(tick);
-      gx = lerp(gx, mx, 0.1);
-      gy = lerp(gy, my, 0.1);
-      glow.style.left = gx + 'px';
-      glow.style.top  = gy + 'px';
-    })();
-  }
-
-  /* ════════════════════════════════════════════════
-     12. PLATFORM CARD 3D TILT
-  ════════════════════════════════════════════════ */
-  function initCardTilt() {
-    qsa('.platform-card, .service-card, .stat-card, .case-card').forEach(card => {
-      card.addEventListener('mousemove', e => {
-        const rect = card.getBoundingClientRect();
-        const x = (e.clientX - rect.left) / rect.width  - 0.5;
-        const y = (e.clientY - rect.top)  / rect.height - 0.5;
-        card.style.transform = `translateY(-6px) rotateX(${-y * 8}deg) rotateY(${x * 8}deg)`;
-        card.style.transition = 'transform 0.1s';
-      });
-      card.addEventListener('mouseleave', () => {
-        card.style.transform = '';
-        card.style.transition = 'transform 0.4s cubic-bezier(0.4,0,0.2,1)';
-      });
-    });
-  }
-
-  /* ════════════════════════════════════════════════
-     13. SPIN KEYFRAME FOR LOADER
-  ════════════════════════════════════════════════ */
-  (function addSpinKeyframe() {
-    const style = document.createElement('style');
-    style.textContent = `
-      @keyframes spin {
-        to { transform: rotate(360deg); }
-      }
-    `;
-    document.head.appendChild(style);
-  })();
-
-  /* ════════════════════════════════════════════════
-     14. PAGE LOAD — reveal
-  ════════════════════════════════════════════════ */
-  function initPageReveal() {
-    const veil = document.createElement('div');
-    veil.style.cssText = `
-      position:fixed;inset:0;z-index:10000;
-      background:#080c14;
-      transition:opacity 0.8s ease;
-    `;
-    document.body.appendChild(veil);
-
-    window.addEventListener('load', () => {
-      setTimeout(() => {
-        veil.style.opacity = '0';
-        setTimeout(() => veil.remove(), 900);
-      }, 200);
-    });
-  }
-
-  /* ════════════════════════════════════════════════
-     INIT ALL
-  ════════════════════════════════════════════════ */
-  initPageReveal();
-
-  document.addEventListener('DOMContentLoaded', () => {
-    initNavbar();
-    initMobileMenu();
-    initAOS();
-    initCounters();
-    initFAQ();
-    initContactForm();
-    initSmoothScroll();
-    initCursorGlow();
-    initCardTilt();
-
-    // Three.js scenes after DOM ready
-    setTimeout(initHeroCanvas, 0);
-    setTimeout(initCtaCanvas,  100);
-
-    // GSAP after Three.js canvases created
-    setTimeout(initGSAP, 50);
+    }
   });
 
+  /* ------------------------------------------------------------------ */
+  /* Onboarding : modal + visite guidée                                  */
+  /* ------------------------------------------------------------------ */
+
+  const ONBOARD_KEY = "hubspot_portfolio_onboarded";
+  let tourActive = false;
+  let tourStep = 0;
+
+  const TOUR_STEPS = [
+    {
+      target: "#tour-table",
+      title: "Voici mes clients",
+      text: "Chaque ligne est un client accompagné, présenté comme une fiche dans un CRM HubSpot.",
+      before: () => goTo("#/"),
+    },
+    {
+      target: "#tour-view-tabs",
+      title: "Filtrez par type d'accompagnement",
+      text: "Accompagnement complet, hybride ou mission ponctuelle : les onglets filtrent réellement le tableau.",
+      before: () => goTo("#/"),
+    },
+    {
+      target: "#tour-record-left",
+      title: "La fiche client",
+      text: "En ouvrant un client, vous accédez à sa fiche complète — comme un vrai record HubSpot, en trois colonnes.",
+      before: () => goTo(`#/client/${CLIENTS[0].id}`),
+    },
+    {
+      target: "#tour-record-center",
+      title: "Ce que j'ai fait pour lui",
+      text: "Les réalisations sont consignées comme des activités dans la timeline de la fiche.",
+      before: () => {},
+    },
+    {
+      target: "#tour-record-right",
+      title: "Ce que ça a changé",
+      text: "Des résultats concrets, sans métriques inventées — et un moyen simple de me contacter.",
+      before: () => {},
+    },
+  ];
+
+  function markOnboarded() {
+    try {
+      localStorage.setItem(ONBOARD_KEY, "1");
+    } catch (e) {
+      /* stockage indisponible : pas bloquant */
+    }
+  }
+
+  function hasOnboarded() {
+    try {
+      return localStorage.getItem(ONBOARD_KEY) === "1";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function showModal() {
+    document.getElementById("welcome-overlay").classList.remove("hidden");
+  }
+
+  function hideModal() {
+    document.getElementById("welcome-overlay").classList.add("hidden");
+  }
+
+  function startTour() {
+    hideModal();
+    markOnboarded();
+    document.getElementById("help-fab").classList.remove("pulse");
+    tourActive = true;
+    tourStep = 0;
+    runTourStep();
+  }
+
+  function skipTour() {
+    tourActive = false;
+    document.getElementById("tour-overlay").classList.add("hidden");
+  }
+
+  function maybeAdvanceTourOnRender() {
+    if (!tourActive) return;
+    requestAnimationFrame(positionTourStep);
+  }
+
+  function runTourStep() {
+    const step = TOUR_STEPS[tourStep];
+    if (!step) {
+      skipTour();
+      return;
+    }
+    step.before();
+    document.getElementById("tour-overlay").classList.remove("hidden");
+    requestAnimationFrame(() => requestAnimationFrame(positionTourStep));
+  }
+
+  function positionTourStep() {
+    const step = TOUR_STEPS[tourStep];
+    if (!step) return;
+    const target = document.querySelector(step.target);
+    const ring = document.getElementById("tour-ring");
+    const bubble = document.getElementById("tour-bubble");
+
+    document.getElementById("tour-step-label").textContent = `Étape ${tourStep + 1}/${TOUR_STEPS.length}`;
+    document.getElementById("tour-title").textContent = step.title;
+    document.getElementById("tour-text").textContent = step.text;
+    document.getElementById("tour-next-btn").textContent =
+      tourStep === TOUR_STEPS.length - 1 ? "Terminer" : "Suivant →";
+
+    if (!target) {
+      ring.classList.add("hidden");
+      bubble.style.top = "50%";
+      bubble.style.left = "50%";
+      return;
+    }
+
+    const rect = target.getBoundingClientRect();
+    const pad = 6;
+    ring.classList.remove("hidden");
+    ring.style.top = `${rect.top - pad}px`;
+    ring.style.left = `${rect.left - pad}px`;
+    ring.style.width = `${rect.width + pad * 2}px`;
+    ring.style.height = `${rect.height + pad * 2}px`;
+
+    const bubbleWidth = 300;
+    let bubbleLeft = rect.left;
+    if (bubbleLeft + bubbleWidth > window.innerWidth - 16) {
+      bubbleLeft = window.innerWidth - bubbleWidth - 16;
+    }
+    if (bubbleLeft < 16) bubbleLeft = 16;
+
+    let bubbleTop = rect.bottom + 16;
+    if (bubbleTop + 160 > window.innerHeight) {
+      bubbleTop = Math.max(16, rect.top - 176);
+    }
+    bubble.style.left = `${bubbleLeft}px`;
+    bubble.style.top = `${bubbleTop}px`;
+  }
+
+  function nextTourStep() {
+    tourStep += 1;
+    if (tourStep >= TOUR_STEPS.length) {
+      skipTour();
+      return;
+    }
+    runTourStep();
+  }
+
+  window.addEventListener("resize", () => {
+    if (tourActive) positionTourStep();
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* Initialisation                                                       */
+  /* ------------------------------------------------------------------ */
+
+  function init() {
+    render();
+
+    document.getElementById("tour-guided-btn").addEventListener("click", startTour);
+    document.getElementById("explore-freely-btn").addEventListener("click", () => {
+      hideModal();
+      markOnboarded();
+    });
+    document.getElementById("tour-skip-btn").addEventListener("click", skipTour);
+    document.getElementById("tour-next-btn").addEventListener("click", nextTourStep);
+    document.getElementById("help-fab").addEventListener("click", startTour);
+
+    if (hasOnboarded()) {
+      document.getElementById("help-fab").classList.remove("pulse");
+    } else {
+      showModal();
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
 })();
